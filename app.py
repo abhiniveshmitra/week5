@@ -9,20 +9,20 @@ from ingestion import (
     list_uploaded_files,
 )
 from PIL import Image
-import openai
+from openai import AzureOpenAI
 
-# --- Load env variables everywhere ---
+# --- Load environment variables ---
 load_dotenv()
-
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 GPT_DEPLOYMENT = os.getenv("GPT_MODEL", "gpt-4-1106-preview")
 
-# --- Configure OpenAI for Azure ---
-openai.api_type = "azure"
-openai.api_key = AZURE_OPENAI_API_KEY
-openai.api_base = AZURE_OPENAI_ENDPOINT
-openai.api_version = "2024-02-01"
+# --- Create the AzureOpenAI client ---
+client = AzureOpenAI(
+    api_key=AZURE_OPENAI_API_KEY,
+    api_version="2024-02-01",
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+)
 
 st.set_page_config(page_title="Modular Q&A Upload Demo", layout="wide")
 st.title("🗂️ Modular Chat + File/Screenshot Upload")
@@ -90,12 +90,12 @@ if st.button("Ask"):
     messages.append({"role": "user", "content": user_prompt})
 
     with st.spinner("Thinking..."):
-        response = openai.ChatCompletion.create(
-            engine=GPT_DEPLOYMENT,
+        response = client.chat.completions.create(
+            model=GPT_DEPLOYMENT,
             messages=messages,
             max_tokens=512,
         )
-        answer = response['choices'][0]['message']['content']
+        answer = response.choices[0].message.content
     st.session_state["chat_history"].append(("User", user_prompt))
     st.session_state["chat_history"].append(("Assistant", answer))
 
