@@ -1,6 +1,7 @@
 import requests
 from dotenv import load_dotenv
 import os
+import time
 
 load_dotenv()
 VISION_KEY = os.getenv("AZURE_VISION_KEY")
@@ -18,9 +19,6 @@ def azure_ocr_image(image_path):
     if response.status_code != 202:
         return "OCR request failed: " + response.text
     operation_url = response.headers["Operation-Location"]
-
-    # Poll for result (usually takes 1-3s)
-    import time
     for _ in range(10):
         result = requests.get(operation_url, headers={'Ocp-Apim-Subscription-Key': VISION_KEY})
         res_json = result.json()
