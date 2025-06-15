@@ -1,6 +1,9 @@
 streamlit
 python-dotenv
 openai
-pypdf2
+pypdf
 Pillow
 requests
+tiktoken
+numpy
+scikit-learn
