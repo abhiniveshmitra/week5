@@ -1,13 +1,19 @@
 import streamlit as st
 from db import init_db, new_chat, get_chats, get_messages, add_message
-from ingestion import save_uploaded_file, save_uploaded_image, extract_text_from_txt, extract_text_from_pdf, extract_text_from_image, is_image
+from ingestion import (
+    save_uploaded_file,
+    save_uploaded_image,
+    extract_text_from_txt,
+    extract_text_from_pdf,
+    extract_text_from_image,
+    is_image
+)
 from embedding_retrieval import chunk_text, build_embedding_index, get_top_chunks
 from PIL import Image
 from openai import AzureOpenAI
+from speech_services import azure_tts, azure_stt
 import uuid
 import base64
-
-# -- Set up environment and AzureOpenAI client as before
 from dotenv import load_dotenv
 import os
 
@@ -31,22 +37,38 @@ chats = get_chats()
 if st.sidebar.button("➕  New Chat"):
     chat_id = new_chat()
     st.session_state["chat_id"] = chat_id
+    st.experimental_rerun()
 if "chat_id" not in st.session_state:
     st.session_state["chat_id"] = chats[0][0] if chats else new_chat()
 
-# List all chats in sidebar
 for cid, name in chats:
     label = name if name else f"Chat {cid}"
     if st.sidebar.button(label, key=f"chat_{cid}"):
         st.session_state["chat_id"] = cid
+        st.experimental_rerun()
 
 chat_id = st.session_state["chat_id"]
-
-# ---- Central Chat Area ----
 messages = get_messages(chat_id)
 doc_chunks = []
-# (Rebuild embeddings from message context if needed for retrieval.)
+for m in messages:
+    if m["type"] == "text" and m["role"] == "user" and m["content"].startswith("[Uploaded "):
+        continue
+    if m["type"] == "text" and m["role"] == "user":
+        for chunk in chunk_text(m["content"]):
+            doc_chunks.append(chunk)
+    if m["type"] == "image" and m["role"] == "user":
+        img_path = f"data/uploads/{uuid.uuid4().hex}.png"
+        with open(img_path, "wb") as f:
+            f.write(base64.b64decode(m["content"]))
+        ocr = extract_text_from_image(img_path)
+        doc_chunks.append(ocr)
 
+if doc_chunks:
+    doc_embeddings = build_embedding_index(doc_chunks)
+else:
+    doc_embeddings = None
+
+# ---- Chat bubbles area ----
 st.markdown("""
 <style>
 .main { background: #f7f7fa;}
@@ -60,7 +82,7 @@ st.markdown("""
     max-width:72%; float: left; clear: both; text-align: left; font-size: 1.13em;
 }
 .bubble-img {
-    border-radius: 14px; border: 2px solid #cce7ff; margin:10px 0; float: right; max-width:200px;
+    border-radius: 14px; border: 2px solid #cce7ff; margin:10px 0; float: right; max-width:220px;
     display: block;
 }
 .msg-clear { clear: both; }
@@ -77,21 +99,41 @@ for entry in messages:
         if role == "user":
             st.markdown(f'<div class="bubble-user">{entry["content"]}</div><div class="msg-clear"></div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="bubble-assistant">{entry["content"]}</div><div class="msg-clear"></div>', unsafe_allow_html=True)
+            msg_id = str(uuid.uuid4())
+            col_a, col_b = st.columns([20,1])
+            with col_a:
+                st.markdown(f'<div class="bubble-assistant">{entry["content"]}</div><div class="msg-clear"></div>', unsafe_allow_html=True)
+            with col_b:
+                if st.button("🔊", key="listen_"+msg_id, help="Listen"):
+                    audio_bytes = azure_tts(entry["content"])
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3")
     elif entry["type"] == "image":
         st.markdown(f'<img src="data:image/png;base64,{entry["content"]}" class="bubble-img"><div class="msg-clear"></div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# --- Chat Input Area ---
+# --- Chat Input: text, upload, paste, voice input ---
 c1, c2, c3 = st.columns([7,1,3])
 with c1:
-    user_prompt = st.text_input("Type your message...", key=str(uuid.uuid4()), label_visibility="collapsed")
+    # If voice was just recognized, auto-fill input box
+    voice_default = st.session_state.pop('voice_input', '') if 'voice_input' in st.session_state else ''
+    user_prompt = st.text_input("Type your message...", value=voice_default, key=str(uuid.uuid4()), label_visibility="collapsed")
 with c2:
     uploaded_file = st.file_uploader("📎", type=["txt", "pdf", "jpg", "jpeg", "png"], label_visibility="collapsed", key=str(uuid.uuid4()))
 with c3:
     pasted_img = st.camera_input("Paste or capture image", key=str(uuid.uuid4()))
 
-# --- File Uploads as message ---
+# Voice input (record then convert to text)
+audio_in = st.audio_recorder("🎤 Record voice (click, speak, click again to stop)", format="wav")
+if audio_in is not None:
+    audio_bytes = audio_in['audio']
+    if audio_bytes:
+        transcript = azure_stt(audio_bytes)
+        if transcript:
+            st.session_state['voice_input'] = transcript
+            st.success(f"You said: {transcript}")
+            st.experimental_rerun()
+
 if uploaded_file is not None:
     filename = uploaded_file.name
     ext = filename.lower().split(".")[-1]
@@ -100,24 +142,25 @@ if uploaded_file is not None:
         with open(file_path, "rb") as imgf:
             b64 = base64.b64encode(imgf.read()).decode()
         add_message(chat_id, "user", "image", b64)
-        ocr_text = extract_text_from_image(file_path)
-        doc_chunks.append(ocr_text)
+        st.experimental_rerun()
     elif ext == "txt":
         file_path = save_uploaded_file(uploaded_file)
         txt = extract_text_from_txt(file_path)
         add_message(chat_id, "user", "text", f"[Uploaded TXT: {filename}]")
         for chunk in chunk_text(txt):
-            doc_chunks.append(chunk)
+            add_message(chat_id, "user", "text", chunk)
+        st.experimental_rerun()
     elif ext == "pdf":
         file_path = save_uploaded_file(uploaded_file)
-        txt, ocr_msgs = extract_text_from_pdf(file_path)
+        txt = extract_text_from_pdf(file_path)
         add_message(chat_id, "user", "text", f"[Uploaded PDF: {filename}]")
         for chunk in chunk_text(txt):
-            doc_chunks.append(chunk)
+            add_message(chat_id, "user", "text", chunk)
+        st.experimental_rerun()
     else:
         add_message(chat_id, "assistant", "text", f"Unsupported file type: {filename}")
+        st.experimental_rerun()
 
-# --- Handle Pasted Images as chat message ---
 if pasted_img is not None:
     img = Image.open(pasted_img)
     temp_img_path = f"data/uploads/pasted_{uuid.uuid4().hex}.png"
@@ -125,16 +168,8 @@ if pasted_img is not None:
     with open(temp_img_path, "rb") as imgf:
         b64 = base64.b64encode(imgf.read()).decode()
     add_message(chat_id, "user", "image", b64)
-    ocr_text = extract_text_from_image(temp_img_path)
-    doc_chunks.append(ocr_text)
+    st.experimental_rerun()
 
-# --- Build embedding index ---
-if doc_chunks:
-    doc_embeddings = build_embedding_index(doc_chunks)
-else:
-    doc_embeddings = None
-
-# --- Handle send ---
 if st.button("Send", use_container_width=True) and user_prompt.strip():
     add_message(chat_id, "user", "text", user_prompt)
     retrieved_chunks = []
@@ -153,6 +188,4 @@ if st.button("Send", use_container_width=True) and user_prompt.strip():
         )
         answer = response.choices[0].message.content
     add_message(chat_id, "assistant", "text", answer)
-
-# (Optional) Auto-scroll JS hack
-
+    st.experimental_rerun()
